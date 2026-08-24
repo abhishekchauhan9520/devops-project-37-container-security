@@ -32,6 +32,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: docker/setup-buildx-action@v4
       - uses: docker/build-push-action@v7
+        id: build
         with:
           context: .
           load: true
@@ -46,6 +47,12 @@ jobs:
           ignore-unfixed: true
           vuln-type: os,library
           severity: CRITICAL,HIGH
+      - uses: anchore/scan-action@v7
+        with:
+          image: container-security-demo:${{ github.sha }}
+          fail-build: true
+          severity-cutoff: high
+          output-format: table
       - uses: anchore/sbom-action@v0
         with:
           image: container-security-demo:${{ github.sha }}
@@ -55,7 +62,7 @@ jobs:
         with:
           name: container-sbom
           path: sbom.cyclonedx.json
-      - name: Run image configuration audit
+      - name: Run hardened runtime audit
         run: |
           docker run --rm \
             --read-only \
@@ -63,7 +70,7 @@ jobs:
             --security-opt no-new-privileges:true \
             --tmpfs /tmp:rw,noexec,nosuid,size=64m \
             --pids-limit 100 \
-            container-security-demo:${GITHUB_SHA} sh -c 'id && cat /proc/1/status | grep NoNewPrivs || true'
+            container-security-demo:${GITHUB_SHA} sh -c 'id && test "$(id -u)" != "0" && grep -q "NoNewPrivs:[[:space:]]*1" /proc/self/status'
 
   provenance:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
