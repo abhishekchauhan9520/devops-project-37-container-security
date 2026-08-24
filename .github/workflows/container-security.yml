@@ -1,0 +1,89 @@
+name: Container Security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write
+  attestations: write
+  id-token: write
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - run: python tests/test_container_security.py
+      - uses: hadolint/hadolint-action@v3.2.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: warning
+
+  build-scan:
+    runs-on: ubuntu-latest
+    needs: static
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: container-security-demo:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: container-security-demo:${{ github.sha }}
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+      - uses: anchore/sbom-action@v0
+        with:
+          image: container-security-demo:${{ github.sha }}
+          format: cyclonedx-json
+          output-file: sbom.cyclonedx.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: container-sbom
+          path: sbom.cyclonedx.json
+      - name: Run image configuration audit
+        run: |
+          docker run --rm \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+            --pids-limit 100 \
+            container-security-demo:${GITHUB_SHA} sh -c 'id && cat /proc/1/status | grep NoNewPrivs || true'
+
+  provenance:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    needs: build-scan
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        id: build
+        with:
+          context: .
+          push: false
+          load: true
+          tags: container-security-demo:${{ github.sha }}
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: container-security-demo
+          subject-digest: ${{ steps.build.outputs.digest }}
